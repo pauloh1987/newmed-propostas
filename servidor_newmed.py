@@ -19,8 +19,19 @@ import sqlite3
 import time
 from functools import wraps
 
+import requests
 from flask import Flask, request, jsonify, g
 from werkzeug.security import generate_password_hash, check_password_hash
+
+# As credenciais do Omie ficam num arquivo separado (omie_config.py) que
+# nunca é enviado pro GitHub. Se esse arquivo ainda não existir ou estiver
+# vazio, a sincronização com o Omie simplesmente fica desativada (sem
+# quebrar o resto do servidor).
+try:
+    from omie_config import OMIE_APP_KEY, OMIE_APP_SECRET
+except ImportError:
+    OMIE_APP_KEY = ""
+    OMIE_APP_SECRET = ""
 
 DB_PATH = "newmed.db"
 
@@ -81,7 +92,8 @@ def init_db():
             nome       TEXT,
             marca      TEXT,
             valor_unit REAL,
-            foto       TEXT
+            foto       TEXT,
+            estoque    INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS propostas (
@@ -99,6 +111,14 @@ def init_db():
         """
     )
     db.commit()
+
+    # migração: se o banco já existia de antes (sem a coluna "estoque"), adiciona ela agora
+    try:
+        db.execute("ALTER TABLE produtos ADD COLUMN estoque INTEGER DEFAULT 0")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass  # a coluna já existe, não precisa fazer nada
+
     db.close()
 
 
@@ -313,13 +333,15 @@ def salvar_produto():
     db = get_db()
     db.execute(
         """
-        INSERT INTO produtos (id, nome, marca, valor_unit, foto)
-        VALUES (?,?,?,?,?)
+        INSERT INTO produtos (id, nome, marca, valor_unit, foto, estoque)
+        VALUES (?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             nome=excluded.nome, marca=excluded.marca,
-            valor_unit=excluded.valor_unit, foto=excluded.foto
+            valor_unit=excluded.valor_unit, foto=excluded.foto,
+            estoque=excluded.estoque
         """,
-        (d["id"], d.get("nome", ""), d.get("marca", ""), d.get("valorUnit", 0), d.get("foto", "")),
+        (d["id"], d.get("nome", ""), d.get("marca", ""), d.get("valorUnit", 0),
+         d.get("foto", ""), d.get("estoque", 0)),
     )
     db.commit()
     return jsonify({"ok": True})
@@ -352,6 +374,78 @@ def excluir_produto(id):
     db.execute("DELETE FROM produtos WHERE id=?", (id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/produtos/sincronizar-omie", methods=["POST"])
+@exigir_login
+def sincronizar_estoque_omie():
+    """Busca no Omie a lista de produtos e atualiza o campo 'estoque' de
+    cada produto já cadastrado aqui que tiver o mesmo nome. Não cria
+    produtos novos — só atualiza a quantidade em estoque dos que você já
+    tem cadastrado no app."""
+    if not OMIE_APP_KEY or not OMIE_APP_SECRET:
+        return jsonify({
+            "erro": "As credenciais do Omie ainda não foram configuradas. "
+                    "Preencha o arquivo omie_config.py com sua App Key e App Secret."
+        }), 400
+
+    db = get_db()
+    produtos_locais = {
+        linha["nome"].strip().lower(): linha["id"]
+        for linha in db.execute("SELECT id, nome FROM produtos").fetchall()
+    }
+
+    atualizados = 0
+    pagina = 1
+    total_paginas = 1  # será corrigido pela primeira resposta do Omie
+
+    while pagina <= total_paginas:
+        payload = {
+            "call": "ListarProdutos",
+            "app_key": OMIE_APP_KEY,
+            "app_secret": OMIE_APP_SECRET,
+            "param": [{
+                "pagina": pagina,
+                "registros_por_pagina": 100,
+                "apenas_importado_api": "N",
+            }],
+        }
+        try:
+            resposta = requests.post(
+                "https://app.omie.com.br/api/v1/geral/produtos/",
+                json=payload, timeout=30,
+            )
+            dados = resposta.json()
+        except Exception as erro:
+            return jsonify({"erro": f"Não consegui falar com o Omie: {erro}"}), 502
+
+        if "faultstring" in dados:
+            return jsonify({"erro": f"O Omie respondeu com um erro: {dados['faultstring']}"}), 400
+
+        total_paginas = dados.get("total_de_paginas", 1)
+        lista_omie = dados.get("produto_servico_cadastro", [])
+
+        for p in lista_omie:
+            nome_omie = (p.get("descricao") or "").strip().lower()
+            id_local = produtos_locais.get(nome_omie)
+            if not id_local:
+                continue  # produto não cadastrado no nosso app — pula
+
+            # o nome exato do campo de estoque pode variar conforme a
+            # configuração da conta Omie; tentamos os mais comuns
+            estoque = (
+                p.get("estoque_atual")
+                or p.get("quantidade_estoque")
+                or (p.get("estoque") or {}).get("saldo")
+                or 0
+            )
+            db.execute("UPDATE produtos SET estoque=? WHERE id=?", (estoque, id_local))
+            atualizados += 1
+
+        pagina += 1
+
+    db.commit()
+    return jsonify({"ok": True, "atualizados": atualizados})
 
 
 # ------------------------------------------------------------------
