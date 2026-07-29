@@ -1,0 +1,13 @@
+# Banco de dados — tem dados reais de clientes e PINs, nunca deve ir pro GitHub
+newmed.db
+
+# Arquivos temporários do Python
+__pycache__/
+*.pyc
+
+# Configurações do PyCharm (cada pessoa tem as suas)
+.idea/
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db

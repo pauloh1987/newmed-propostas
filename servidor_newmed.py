@@ -1,0 +1,436 @@
+"""
+Backend da Newmed - Propostas de Venda
+========================================
+Uma API bem simples feita em Flask, que guarda tudo num banco SQLite
+(um arquivo só, chamado newmed.db, criado automaticamente na primeira vez
+que você rodar este arquivo).
+
+Como rodar:
+    1) pip install flask
+    2) python app.py
+    3) o servidor sobe em http://localhost:5000
+
+O app.html (front-end) vai fazer pedidos pra esse endereço.
+"""
+
+import json
+import secrets
+import sqlite3
+import time
+from functools import wraps
+
+from flask import Flask, request, jsonify, g
+from werkzeug.security import generate_password_hash, check_password_hash
+
+DB_PATH = "newmed.db"
+
+app = Flask(__name__)
+
+
+# ------------------------------------------------------------------
+# CONEXÃO COM O BANCO DE DADOS
+# ------------------------------------------------------------------
+def get_db():
+    """Devolve uma conexão com o banco, reaproveitando a mesma durante
+    o mesmo pedido (padrão recomendado pelo próprio Flask)."""
+    db = getattr(g, "_database", None)
+    if db is None:
+        db = g._database = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row  # permite acessar colunas pelo nome
+    return db
+
+
+@app.teardown_appcontext
+def close_db(exception):
+    db = getattr(g, "_database", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    """Cria as tabelas se elas ainda não existirem. Roda uma vez quando
+    o servidor liga."""
+    db = sqlite3.connect(DB_PATH)
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id        TEXT PRIMARY KEY,
+            nome      TEXT UNIQUE,
+            pin_hash  TEXT,
+            criado_em TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sessoes (
+            token      TEXT PRIMARY KEY,
+            usuario_id TEXT,
+            criado_em  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS clientes (
+            cnpj      TEXT PRIMARY KEY,
+            razao     TEXT,
+            fantasia  TEXT,
+            ac        TEXT,
+            endereco  TEXT,
+            bairro    TEXT,
+            cidade    TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS produtos (
+            id         TEXT PRIMARY KEY,
+            nome       TEXT,
+            marca      TEXT,
+            valor_unit REAL,
+            foto       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS propostas (
+            id            TEXT PRIMARY KEY,
+            numero        TEXT,
+            data          TEXT,
+            status        TEXT,
+            valor_total   REAL,
+            dados_json    TEXT,
+            criado_em     TEXT,
+            atualizado_em TEXT,
+            criado_por    TEXT,
+            atualizado_por TEXT
+        );
+        """
+    )
+    db.commit()
+    db.close()
+
+
+# ------------------------------------------------------------------
+# CORS "na mão" (sem precisar instalar a biblioteca flask-cors)
+# Isso é o que permite que o app.html, aberto direto no navegador,
+# consiga chamar essa API mesmo estando em "origens" diferentes.
+# ------------------------------------------------------------------
+@app.after_request
+def liberar_cors(resposta):
+    resposta.headers["Access-Control-Allow-Origin"] = "*"
+    resposta.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    resposta.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return resposta
+
+
+@app.route("/api/<path:qualquer>", methods=["OPTIONS"])
+def responder_preflight(qualquer):
+    # o navegador manda um pedido "OPTIONS" antes do de verdade, só
+    # perguntando se pode. Aqui a gente sempre responde que pode.
+    return "", 204
+
+
+def agora():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+# ------------------------------------------------------------------
+# AUTENTICAÇÃO
+# ------------------------------------------------------------------
+def usuario_pelo_token(token):
+    """Procura na tabela de sessões quem é o dono desse token."""
+    if not token:
+        return None
+    db = get_db()
+    linha = db.execute(
+        """
+        SELECT usuarios.id, usuarios.nome
+        FROM sessoes
+        JOIN usuarios ON usuarios.id = sessoes.usuario_id
+        WHERE sessoes.token = ?
+        """,
+        (token,),
+    ).fetchone()
+    return dict(linha) if linha else None
+
+
+def pegar_token_do_pedido():
+    """O front-end manda o token assim: Authorization: Bearer <token>"""
+    cabecalho = request.headers.get("Authorization", "")
+    if cabecalho.startswith("Bearer "):
+        return cabecalho[len("Bearer "):]
+    return None
+
+
+def exigir_login(funcao_da_rota):
+    """Decorador: coloca em cima de uma rota pra exigir que a pessoa
+    esteja logada. Se não estiver, devolve erro 401 (não autorizado)."""
+    @wraps(funcao_da_rota)
+    def rota_protegida(*args, **kwargs):
+        usuario = usuario_pelo_token(pegar_token_do_pedido())
+        if not usuario:
+            return jsonify({"erro": "É preciso estar logado."}), 401
+        g.usuario_logado = usuario
+        return funcao_da_rota(*args, **kwargs)
+    return rota_protegida
+
+
+def criar_sessao(usuario_id):
+    """Cria um token novo de sessão pra esse usuário e devolve ele."""
+    token = secrets.token_hex(24)
+    db = get_db()
+    db.execute(
+        "INSERT INTO sessoes (token, usuario_id, criado_em) VALUES (?,?,?)",
+        (token, usuario_id, agora()),
+    )
+    db.commit()
+    return token
+
+
+@app.route("/api/usuarios", methods=["GET"])
+def listar_usuarios():
+    """Lista pública (sem precisar estar logado) só com os nomes —
+    usada pra montar a telinha 'Quem é você?' antes do login."""
+    db = get_db()
+    linhas = db.execute("SELECT id, nome FROM usuarios ORDER BY nome").fetchall()
+    return jsonify([dict(linha) for linha in linhas])
+
+
+@app.route("/api/usuarios", methods=["POST"])
+def criar_usuario():
+    """Cria uma pessoa nova (nome + PIN de 4 dígitos) e já loga ela."""
+    d = request.get_json()
+    nome = (d.get("nome") or "").strip()
+    pin = (d.get("pin") or "").strip()
+
+    if not nome:
+        return jsonify({"erro": "Digite seu nome."}), 400
+    if not (pin.isdigit() and len(pin) == 4):
+        return jsonify({"erro": "O PIN precisa ter exatamente 4 números."}), 400
+
+    db = get_db()
+    ja_existe = db.execute("SELECT id FROM usuarios WHERE nome=?", (nome,)).fetchone()
+    if ja_existe:
+        return jsonify({"erro": "Já existe alguém cadastrado com esse nome. Escolha esse nome na lista e entre com o PIN, ou use um nome um pouco diferente (ex: sobrenome junto)."}), 400
+
+    usuario_id = secrets.token_hex(8)
+    db.execute(
+        "INSERT INTO usuarios (id, nome, pin_hash, criado_em) VALUES (?,?,?,?)",
+        (usuario_id, nome, generate_password_hash(pin), agora()),
+    )
+    db.commit()
+
+    token = criar_sessao(usuario_id)
+    return jsonify({"ok": True, "token": token, "usuario": {"id": usuario_id, "nome": nome}})
+
+
+@app.route("/api/entrar", methods=["POST"])
+def entrar():
+    d = request.get_json()
+    nome = (d.get("nome") or "").strip()
+    pin = (d.get("pin") or "").strip()
+
+    db = get_db()
+    usuario = db.execute("SELECT * FROM usuarios WHERE nome=?", (nome,)).fetchone()
+    if not usuario or not check_password_hash(usuario["pin_hash"], pin):
+        return jsonify({"erro": "PIN incorreto."}), 401
+
+    token = criar_sessao(usuario["id"])
+    return jsonify({
+        "ok": True,
+        "token": token,
+        "usuario": {"id": usuario["id"], "nome": usuario["nome"]},
+    })
+
+
+@app.route("/api/logout", methods=["POST"])
+def logout():
+    token = pegar_token_do_pedido()
+    if token:
+        db = get_db()
+        db.execute("DELETE FROM sessoes WHERE token=?", (token,))
+        db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/eu", methods=["GET"])
+def eu():
+    usuario = usuario_pelo_token(pegar_token_do_pedido())
+    if not usuario:
+        return jsonify({"erro": "Não logado."}), 401
+    return jsonify(usuario)
+
+
+# ------------------------------------------------------------------
+# CLIENTES
+# ------------------------------------------------------------------
+@app.route("/api/clientes", methods=["GET"])
+@exigir_login
+def listar_clientes():
+    db = get_db()
+    linhas = db.execute("SELECT * FROM clientes").fetchall()
+    return jsonify([dict(linha) for linha in linhas])
+
+
+@app.route("/api/clientes", methods=["POST"])
+@exigir_login
+def salvar_cliente():
+    d = request.get_json()
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO clientes (cnpj, razao, fantasia, ac, endereco, bairro, cidade)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(cnpj) DO UPDATE SET
+            razao=excluded.razao, fantasia=excluded.fantasia, ac=excluded.ac,
+            endereco=excluded.endereco, bairro=excluded.bairro, cidade=excluded.cidade
+        """,
+        (
+            d["cnpj"], d.get("razao", ""), d.get("fantasia", ""), d.get("ac", ""),
+            d.get("endereco", ""), d.get("bairro", ""), d.get("cidade", ""),
+        ),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/clientes/<cnpj>", methods=["DELETE"])
+@exigir_login
+def excluir_cliente(cnpj):
+    db = get_db()
+    db.execute("DELETE FROM clientes WHERE cnpj=?", (cnpj,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------------
+# PRODUTOS
+# ------------------------------------------------------------------
+@app.route("/api/produtos", methods=["GET"])
+@exigir_login
+def listar_produtos():
+    db = get_db()
+    linhas = db.execute("SELECT * FROM produtos").fetchall()
+    return jsonify([dict(linha) for linha in linhas])
+
+
+@app.route("/api/produtos", methods=["POST"])
+@exigir_login
+def salvar_produto():
+    d = request.get_json()
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO produtos (id, nome, marca, valor_unit, foto)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            nome=excluded.nome, marca=excluded.marca,
+            valor_unit=excluded.valor_unit, foto=excluded.foto
+        """,
+        (d["id"], d.get("nome", ""), d.get("marca", ""), d.get("valorUnit", 0), d.get("foto", "")),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/produtos/importar", methods=["POST"])
+@exigir_login
+def importar_produtos():
+    """Recebe uma lista de produtos de uma vez (usado pela importação de CSV)."""
+    itens = request.get_json()
+    db = get_db()
+    for d in itens:
+        db.execute(
+            """
+            INSERT INTO produtos (id, nome, marca, valor_unit, foto)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                nome=excluded.nome, marca=excluded.marca, valor_unit=excluded.valor_unit
+            """,
+            (d["id"], d.get("nome", ""), d.get("marca", ""), d.get("valorUnit", 0), d.get("foto", "")),
+        )
+    db.commit()
+    return jsonify({"ok": True, "importados": len(itens)})
+
+
+@app.route("/api/produtos/<id>", methods=["DELETE"])
+@exigir_login
+def excluir_produto(id):
+    db = get_db()
+    db.execute("DELETE FROM produtos WHERE id=?", (id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------------
+# PROPOSTAS
+# ------------------------------------------------------------------
+@app.route("/api/propostas", methods=["GET"])
+@exigir_login
+def listar_propostas():
+    db = get_db()
+    linhas = db.execute("SELECT * FROM propostas").fetchall()
+    resultado = []
+    for linha in linhas:
+        item = dict(linha)
+        item["dados"] = json.loads(item.pop("dados_json") or "{}")
+        resultado.append(item)
+    return jsonify(resultado)
+
+
+@app.route("/api/propostas", methods=["POST"])
+@exigir_login
+def salvar_proposta():
+    d = request.get_json()
+    db = get_db()
+    existente = db.execute(
+        "SELECT criado_em, criado_por FROM propostas WHERE id=?", (d["id"],)
+    ).fetchone()
+    criado_em = existente["criado_em"] if existente else agora()
+    criado_por = existente["criado_por"] if existente else g.usuario_logado["nome"]
+
+    db.execute(
+        """
+        INSERT INTO propostas (id, numero, data, status, valor_total, dados_json,
+                                criado_em, atualizado_em, criado_por, atualizado_por)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            numero=excluded.numero, data=excluded.data, status=excluded.status,
+            valor_total=excluded.valor_total, dados_json=excluded.dados_json,
+            atualizado_em=excluded.atualizado_em, atualizado_por=excluded.atualizado_por
+        """,
+        (
+            d["id"], d.get("numero", ""), d.get("data", ""), d.get("status", "aberto"),
+            d.get("valorTotal", 0), json.dumps(d.get("dados", {}), ensure_ascii=False),
+            criado_em, agora(), criado_por, g.usuario_logado["nome"],
+        ),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/propostas/<id>", methods=["PUT"])
+@exigir_login
+def atualizar_status_proposta(id):
+    d = request.get_json()
+    db = get_db()
+    db.execute(
+        "UPDATE propostas SET status=?, atualizado_em=? WHERE id=?",
+        (d["status"], agora(), id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/propostas/<id>", methods=["DELETE"])
+@exigir_login
+def excluir_proposta(id):
+    db = get_db()
+    db.execute("DELETE FROM propostas WHERE id=?", (id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/status", methods=["GET"])
+def status():
+    """Só pra testar rapidinho se o servidor está de pé."""
+    return jsonify({"ok": True, "mensagem": "Servidor da Newmed rodando!"})
+
+
+if __name__ == "__main__":
+    init_db()
+    print("Banco de dados pronto em:", DB_PATH)
+    print("Servidor rodando em http://localhost:5000")
+    app.run(debug=True, port=5000)
