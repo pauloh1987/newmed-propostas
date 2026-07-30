@@ -379,10 +379,10 @@ def excluir_produto(id):
 @app.route("/api/produtos/sincronizar-omie", methods=["POST"])
 @exigir_login
 def sincronizar_estoque_omie():
-    """Busca no Omie a lista de produtos e atualiza o campo 'estoque' de
-    cada produto já cadastrado aqui que tiver o mesmo nome. Não cria
-    produtos novos — só atualiza a quantidade em estoque dos que você já
-    tem cadastrado no app."""
+    """Busca no Omie a lista COMPLETA de produtos. Para cada um:
+    - se já existe aqui (mesmo nome), atualiza o estoque e o valor;
+    - se não existe, CRIA um produto novo no app.
+    Ou seja, isso importa o catálogo inteiro do Omie pra dentro do app."""
     if not OMIE_APP_KEY or not OMIE_APP_SECRET:
         return jsonify({
             "erro": "As credenciais do Omie ainda não foram configuradas. "
@@ -396,6 +396,7 @@ def sincronizar_estoque_omie():
     }
 
     atualizados = 0
+    criados = 0
     pagina = 1
     total_paginas = 1  # será corrigido pela primeira resposta do Omie
 
@@ -406,14 +407,14 @@ def sincronizar_estoque_omie():
             "app_secret": OMIE_APP_SECRET,
             "param": [{
                 "pagina": pagina,
-                "registros_por_pagina": 100,
+                "registros_por_pagina": 200,
                 "apenas_importado_api": "N",
             }],
         }
         try:
             resposta = requests.post(
                 "https://app.omie.com.br/api/v1/geral/produtos/",
-                json=payload, timeout=30,
+                json=payload, timeout=60,
             )
             dados = resposta.json()
         except Exception as erro:
@@ -426,26 +427,45 @@ def sincronizar_estoque_omie():
         lista_omie = dados.get("produto_servico_cadastro", [])
 
         for p in lista_omie:
-            nome_omie = (p.get("descricao") or "").strip().lower()
-            id_local = produtos_locais.get(nome_omie)
-            if not id_local:
-                continue  # produto não cadastrado no nosso app — pula
+            nome_omie = (p.get("descricao") or "").strip()
+            if not nome_omie:
+                continue
+            chave = nome_omie.lower()
 
-            # o nome exato do campo de estoque pode variar conforme a
-            # configuração da conta Omie; tentamos os mais comuns
-            estoque = (
-                p.get("estoque_atual")
-                or p.get("quantidade_estoque")
-                or (p.get("estoque") or {}).get("saldo")
-                or 0
-            )
-            db.execute("UPDATE produtos SET estoque=? WHERE id=?", (estoque, id_local))
-            atualizados += 1
+            marca = p.get("marca") or ""
+            valor = p.get("valor_unitario") or 0
+            estoque = p.get("quantidade_estoque")
+            if estoque is None:
+                estoque = p.get("estoque_atual", 0)
+
+            id_local = produtos_locais.get(chave)
+            if id_local:
+                # já existe no app -> só atualiza estoque e valor
+                db.execute(
+                    "UPDATE produtos SET valor_unit=?, estoque=? WHERE id=?",
+                    (valor, estoque, id_local),
+                )
+                atualizados += 1
+            else:
+                # não existe -> cria um produto novo
+                novo_id = p.get("codigo") or secrets.token_hex(6)
+                db.execute(
+                    """
+                    INSERT INTO produtos (id, nome, marca, valor_unit, foto, estoque)
+                    VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        nome=excluded.nome, marca=excluded.marca,
+                        valor_unit=excluded.valor_unit, estoque=excluded.estoque
+                    """,
+                    (str(novo_id), nome_omie, marca, valor, "", estoque),
+                )
+                produtos_locais[chave] = str(novo_id)
+                criados += 1
 
         pagina += 1
 
     db.commit()
-    return jsonify({"ok": True, "atualizados": atualizados})
+    return jsonify({"ok": True, "atualizados": atualizados, "criados": criados})
 
 
 # ------------------------------------------------------------------
