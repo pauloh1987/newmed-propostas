@@ -8,6 +8,14 @@
     --verde:#1e7e34;
     --vermelho:#c0392b;
   }
+  [data-tema="escuro"]{
+    --azul-escuro:#0d1f33;
+    --azul:#1a4f85;
+    --azul-claro:#192339;
+    --cinza-borda:#353a47;
+    --amarelo:#5a4a10;
+    --texto:#e0e4ec;
+  }
   *{box-sizing:border-box;}
   body{
     margin:0;
@@ -46,6 +54,11 @@
     border-bottom:3px solid #6ab0f3;
   }
   .topnav button:hover{color:#fff;}
+  .tema-btn{
+    background:none; border:none; cursor:pointer; font-size:17px;
+    padding:4px 7px; line-height:1; border-radius:4px; color:#cfe0f5;
+  }
+  .tema-btn:hover{background:rgba(255,255,255,.15);}
   .topnav-usuario{
     margin-left:auto;
     display:flex;
@@ -771,3 +784,60 @@
     cursor:pointer;
     color:#fff;
   }
+
+  /* ==================================================================
+     MODO NOTURNO — sobrescreve cores fixas quando data-tema="escuro"
+     ================================================================== */
+  [data-tema="escuro"] body{background:#13161a;}
+
+  [data-tema="escuro"] .painel,
+  [data-tema="escuro"] .card-status,
+  [data-tema="escuro"] .progresso-box,
+  [data-tema="escuro"] .login-box,
+  [data-tema="escuro"] .alerta-item,
+  [data-tema="escuro"] .vazio-lista,
+  [data-tema="escuro"] .produtos-form,
+  [data-tema="escuro"] .produto-card,
+  [data-tema="escuro"] .produtos-add-card{
+    background:#1a1d24;
+  }
+
+  [data-tema="escuro"] table.lista-propostas{background:#1a1d24;}
+  [data-tema="escuro"] table.lista-propostas td{border-bottom-color:#2a2d35;}
+  [data-tema="escuro"] table.lista-propostas tr:hover td{background:#1e2535;}
+  [data-tema="escuro"] .filtros-status button{
+    background:#1a1d24; border-color:var(--cinza-borda);
+  }
+  [data-tema="escuro"] .cartao-usuario{
+    background:#1a1d24; color:#c0c4cc;
+  }
+  [data-tema="escuro"] .cartao-usuario:hover{background:#192339;}
+  [data-tema="escuro"] .sem-usuarios{color:#6a6e78;}
+
+  [data-tema="escuro"] .card-status-label{color:#9a9ea8;}
+  [data-tema="escuro"] .card-status-qtd{color:#6a6e78;}
+  [data-tema="escuro"] .progresso-titulo{color:#b0b4be;}
+  [data-tema="escuro"] .progresso-legenda{color:#9a9ea8;}
+  [data-tema="escuro"] .progresso-barra{background:#2a2d35;}
+  [data-tema="escuro"] .alerta-pendentes{background:#2a2210; border-color:#5a4a10;}
+  [data-tema="escuro"] .alerta-pendentes-titulo{color:#c0a040;}
+
+  [data-tema="escuro"] input,
+  [data-tema="escuro"] select,
+  [data-tema="escuro"] textarea{
+    background:#1e2128; border-color:var(--cinza-borda); color:var(--texto);
+  }
+  [data-tema="escuro"] label{color:#c0c4cc;}
+
+  [data-tema="escuro"] #doc{background:#1a1d24; color:var(--texto);}
+  [data-tema="escuro"] #doc .dados-linha:nth-child(even){background:#20232b;}
+  [data-tema="escuro"] #doc .assinatura-nome{color:#6a8abc;}
+  [data-tema="escuro"] #doc .assinatura-cargo{color:#9a9ea8;}
+  [data-tema="escuro"] #doc .conforme{color:#9a9ea8;}
+  [data-tema="escuro"] #doc td.rotulo{background:#20232b;}
+
+  [data-tema="escuro"] .foto-preview{background:#1e2128;}
+  [data-tema="escuro"] .produto-card .marca{color:#9a9ea8;}
+  [data-tema="escuro"] .produto-card img{background:#1e2128;}
+  [data-tema="escuro"] .dica-pdf{color:#9a9ea8;}
+  [data-tema="escuro"] .topnav-usuario .tema-btn{color:#cfe0f5;}

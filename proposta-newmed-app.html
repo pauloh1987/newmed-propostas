@@ -16,6 +16,7 @@
   <button id="nav-produtos" onclick="mostrarTela('produtos')">📦 Produtos</button>
   <button id="nav-clientes" onclick="mostrarTela('clientes')">👥 Clientes</button>
   <div class="topnav-usuario">
+    <button class="tema-btn" id="btnTema" onclick="alternarTema()" title="Alternar tema">🌙</button>
     <span id="usuario-logado-nome"></span>
     <button onclick="fazerLogout()">Sair</button>
   </div>
@@ -1942,6 +1943,24 @@ async function iniciarAppLogado(){
     mostrarTelaLogin();
   }
 })();
+
+/* ─── Alternar tema claro/escuro ─── */
+(function(){
+  const tema = localStorage.getItem('newmed-tema');
+  if(tema === 'escuro') document.documentElement.setAttribute('data-tema','escuro');
+})();
+function alternarTema(){
+  const h=document.documentElement, b=document.getElementById('btnTema');
+  if(h.getAttribute('data-tema')==='escuro'){
+    h.removeAttribute('data-tema');
+    localStorage.setItem('newmed-tema','claro');
+    b.textContent='🌙';
+  }else{
+    h.setAttribute('data-tema','escuro');
+    localStorage.setItem('newmed-tema','escuro');
+    b.textContent='☀️';
+  }
+}
 
 </script>
 </body>
